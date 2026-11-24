@@ -15,7 +15,7 @@ android {
 
     defaultConfig {
         // Its own package: the 4.x TVs never get the full app, and the two update separately.
-        applicationId = "app.orchard.tv.lite"
+        applicationId = "com.ts.launcher"
         // Android 4.0.
         minSdk = 14
         targetSdk = 34
