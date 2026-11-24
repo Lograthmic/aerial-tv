@@ -48,8 +48,8 @@ import java.util.Locale
 object Updates {
     private const val TAG = "AerialUpdates"
     private const val PREFS = "updates"
-    private const val VERSION_URL = "https://aerial.qust.me/download/version.txt"
-    private const val NOTES_URL = "https://aerial.qust.me/download/notes.json"
+    private const val VERSION_URL = "https://github.com/Lograthmic/aerial-tv/releases/latest/download/version.txt"
+    private const val NOTES_URL = "https://github.com/Lograthmic/aerial-tv/releases/latest/download/notes.json"
 
     /**
      * A source that delivers less than [STALL_BYTES] in [STALL_MS] is given up for the next one
@@ -208,7 +208,7 @@ object Updates {
     }
 
     /** The official package. Copies renamed for one firmware (OPPO, see docs/devices) cannot update from the release. */
-    private const val PACKAGE = "app.orchard.tv"
+    private const val PACKAGE = "com.ts.launcher"
 
     /** Whether this copy can update itself from the release at all. */
     fun canInstall(context: Context): Boolean = context.packageName == PACKAGE
@@ -597,8 +597,7 @@ object Updates {
         }
         val name = "aerial-${BuildConfig.FLAVOR}.apk"
         val sources = listOf(
-            "https://aerial.qust.me/download/$name",
-            "https://github.com/pengchujin/aerial-tv/releases/latest/download/$name",
+            "https://github.com/Lograthmic/aerial-tv/releases/latest/download/$name",
         )
         for (url in sources) {
             val ok = runCatching { download(url, file) }
