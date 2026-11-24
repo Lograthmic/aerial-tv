@@ -1,0 +1,195 @@
+name: Upstream merge
+
+on:
+  schedule:
+    - cron: "0 4 * * *"          # UTC 04:00 ( 北京时间 12:00 )
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "上游版本号，以v开头，留空为最新版本"
+        required: false
+        default: ""
+
+concurrency:
+  group: upstream-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM: pengchujin/aerial-tv
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      merge: ${{ steps.v.outputs.merge }}
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        env:
+          WANT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${WANT_TAG:-$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)}"
+          version="${tag#v}"
+          have="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)"
+          echo "upstream=$tag ($version), this build=$have"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            if [ "$version" = "$have" ]; then echo "merge=false"; else echo "merge=true"; fi
+          } >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: check
+    if: needs.check.outputs.merge == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      merged: ${{ steps.m.outputs.merged }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: m
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name  "aerial-bot"
+          git config user.email "aerial-bot@users.noreply.github.com"
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --force upstream "refs/tags/$TAG:refs/tags/$TAG"
+
+          if git merge --no-ff --no-edit -m "合并上游版本 $TAG" "refs/tags/$TAG"; then
+            git push origin HEAD:main
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          
+          # 合并冲突提PR
+          if [ -z "$(git ls-files -u)" ]; then
+            echo "::error::非合并冲突导致失败，无法提PR，检查日志！"
+            exit 1
+          fi
+          files="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+          git merge --abort
+
+          cat > /tmp/pr-body.md <<EOF
+          上游 \`$TAG\` 与当前构建的改动存在冲突，因此本次没有构建，也没有发布。
+          
+          冲突文件：\`$files\`
+          
+          请在本 PR 中解决冲突（GitHub 提供 “Resolve conflicts” 按钮），然后合并到 \`main\`；下一次运行会自动构建并发布。
+          EOF
+
+          git push --force origin "refs/tags/$TAG:refs/heads/upstream/$TAG"
+          # 保证当前没有未处理完的PR
+          if [ -z "$(gh pr list --base main --head "upstream/$TAG" --json number --jq '.[0].number')" ]; then
+            gh pr create --base main --head "upstream/$TAG" \
+              --title "Merge upstream $TAG (conflicts)" \
+              --body-file /tmp/pr-body.md
+          fi
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [check, merge]
+    if: needs.merge.outputs.merged == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-36
+            build-tools;36.0.0
+            platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::KEYSTORE_BASE64 未设置"
+            exit 1
+          fi
+          mkdir -p local
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > local/aerial.jks
+          cat > local/signing.properties <<EOF
+          storeFile=aerial.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Build the three APKs
+        run: ./gradlew assembleStandardRelease assembleGuardRelease :lite:assembleRelease
+
+      - name: Collect APKs
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/standard/release/app-standard-release.apk dist/aerial-standard.apk
+          cp app/build/outputs/apk/guard/release/app-guard-release.apk      dist/aerial-guard.apk
+          cp lite/build/outputs/apk/release/lite-release.apk                 dist/aerial-lite.apk
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: dist/*.apk
+          if-no-files-found: error
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: apks
+          path: dist
+
+      - name: version.txt and notes.json
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$TAG" > dist/version.txt
+          gh api "repos/$UPSTREAM/releases?per_page=12" | python3 tools/release-notes.py > dist/notes.json
+          cat dist/version.txt
+          head -c 240 dist/notes.json; echo
+
+      - name: Create release
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists, nothing to do"
+            exit 0
+          fi
+          gh api "repos/$UPSTREAM/releases/tags/$TAG" --jq .body > /tmp/body.md 2>/dev/null \
+            || echo "Aerial $VERSION" > /tmp/body.md
+          gh release create "$TAG" dist/* \
+            --target main \
+            --title "Aerial $VERSION" \
+            --notes-file /tmp/body.md
