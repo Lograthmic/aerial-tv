@@ -9,6 +9,11 @@ on:
         description: "上游版本号，以v开头，留空为最新版本"
         required: false
         default: ""
+      force:
+        description: "跳过版本检查强制合并构建发布"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: upstream-merge
@@ -36,6 +41,7 @@ jobs:
       - id: v
         env:
           WANT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
           tag="${WANT_TAG:-$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)}"
@@ -45,7 +51,11 @@ jobs:
           {
             echo "tag=$tag"
             echo "version=$version"
-            if [ "$version" = "$have" ]; then echo "merge=false"; else echo "merge=true"; fi
+            if [ "$version" = "$have" ] && [ "$FORCE" != "true" ]; then 
+              echo "merge=false"; 
+            else 
+              echo "merge=true"; 
+            fi
           } >> "$GITHUB_OUTPUT"
 
   merge:
